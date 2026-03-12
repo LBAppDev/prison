@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,13 +60,17 @@ def is_guard_or_admin(member: discord.Member, guild_config: dict) -> bool:
     return any(role.id == guard_role_id for role in member.roles)
 
 
-def ensure_bot_permissions(guild: discord.Guild) -> str | None:
+def ensure_bot_permissions(
+    guild: discord.Guild, need_channels: bool = False
+) -> str | None:
     bot_member = guild.me
     if not bot_member:
         return "Bot not in guild."
     perms = bot_member.guild_permissions
-    if not perms.manage_roles or not perms.manage_channels:
-        return "Bot needs Manage Roles and Manage Channels permissions."
+    if not perms.manage_roles:
+        return "Bot needs Manage Roles permission."
+    if need_channels and not perms.manage_channels:
+        return "Bot needs Manage Channels permission."
     return None
 
 
@@ -73,6 +78,13 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+guild_locks: dict[int, asyncio.Lock] = {}
+
+
+def get_guild_lock(guild_id: int) -> asyncio.Lock:
+    if guild_id not in guild_locks:
+        guild_locks[guild_id] = asyncio.Lock()
+    return guild_locks[guild_id]
 
 
 async def register_commands() -> None:
@@ -163,59 +175,6 @@ async def ensure_setup(guild: discord.Guild, config: dict) -> dict:
     }
 
 
-async def apply_prison_overwrites(
-    guild: discord.Guild, member: discord.Member, guild_config: dict
-) -> dict:
-    skip_ids = {
-        guild_config.get("prisonCategoryId"),
-        guild_config.get("prisonTextChannelId"),
-        guild_config.get("prisonVoiceChannelId"),
-    }
-
-    overwrites = {}
-    for channel in guild.channels:
-        if channel.id in skip_ids:
-            continue
-        if isinstance(channel, discord.Thread):
-            continue
-
-        current = channel.overwrites.get(member)
-        if current is None:
-            overwrites[str(channel.id)] = None
-        else:
-            allow, deny = current.pair()
-            overwrites[str(channel.id)] = {
-                "allow": allow.value,
-                "deny": deny.value,
-            }
-
-        await channel.set_permissions(
-            member, view_channel=False, reason="Imprisoned by prison bot"
-        )
-
-    return overwrites
-
-
-async def restore_prison_overwrites(
-    guild: discord.Guild, member: discord.Member, overwrites: dict
-) -> None:
-    if not overwrites:
-        return
-    for channel_id, previous in overwrites.items():
-        channel = guild.get_channel(int(channel_id))
-        if not channel or isinstance(channel, discord.Thread):
-            continue
-
-        if previous is None:
-            await channel.set_permissions(member, overwrite=None)
-            continue
-
-        allow = discord.Permissions(previous["allow"])
-        deny = discord.Permissions(previous["deny"])
-        overwrite = discord.PermissionOverwrite.from_pair(allow, deny)
-        await channel.set_permissions(member, overwrite=overwrite)
-
-
 @bot.event
 async def on_ready() -> None:
     print(f"Logged in as {bot.user}")
@@ -254,7 +213,7 @@ async def setup(interaction: discord.Interaction) -> None:
         )
         return
 
-    bot_perm_error = ensure_bot_permissions(interaction.guild)
+    bot_perm_error = ensure_bot_permissions(interaction.guild, need_channels=True)
     if bot_perm_error:
         await interaction.response.send_message(bot_perm_error, ephemeral=True)
         return
@@ -280,6 +239,19 @@ async def imprison_member(
     target: discord.Member,
     reason: str | None,
 ) -> tuple[bool, str]:
+    lock = get_guild_lock(guild.id)
+    if lock.locked():
+        return False, "Another prison action is already running. Try again."
+    async with lock:
+        return await _imprison_member(guild, actor, target, reason)
+
+
+async def _imprison_member(
+    guild: discord.Guild,
+    actor: discord.Member,
+    target: discord.Member,
+    reason: str | None,
+) -> tuple[bool, str]:
     config = load_config()
     guild_config = get_guild_config(config, guild.id)
 
@@ -296,13 +268,7 @@ async def imprison_member(
     if is_admin(target):
         return False, "You cannot imprison an admin."
 
-    required_keys = (
-        "prisonRoleId",
-        "guardRoleId",
-        "prisonTextChannelId",
-        "prisonVoiceChannelId",
-    )
-    if not all(guild_config.get(k) for k in required_keys):
+    if not guild_config.get("prisonRoleId") or not guild_config.get("guardRoleId"):
         return False, "Prison is not set up. Run /setup first."
 
     if str(target.id) in guild_config["prisoners"]:
@@ -321,6 +287,9 @@ async def imprison_member(
     if bot_member.top_role <= prison_role:
         return False, "Move my role above the Prisoner role."
 
+    managed_roles = [
+        role for role in target.roles if role.managed and role.id != guild.id
+    ]
     roles_to_remove = [
         role
         for role in target.roles
@@ -330,16 +299,12 @@ async def imprison_member(
         and role.position < bot_member.top_role.position
     ]
     role_ids = [role.id for role in roles_to_remove]
-    if role_ids:
-        await target.remove_roles(*roles_to_remove, reason="Imprisoned by prison bot")
 
-    await target.add_roles(prison_role, reason="Imprisoned by prison bot")
-
-    overwrites = await apply_prison_overwrites(guild, target, guild_config)
+    new_roles = [prison_role] + managed_roles
+    await target.edit(roles=new_roles, reason="Imprisoned by prison bot")
 
     guild_config["prisoners"][str(target.id)] = {
         "roles": role_ids,
-        "overwrites": overwrites,
         "reason": reason or "No reason given",
         "moderatorId": actor.id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -350,6 +315,16 @@ async def imprison_member(
 
 
 async def release_member(
+    guild: discord.Guild, actor: discord.Member, target: discord.Member
+) -> tuple[bool, str]:
+    lock = get_guild_lock(guild.id)
+    if lock.locked():
+        return False, "Another prison action is already running. Try again."
+    async with lock:
+        return await _release_member(guild, actor, target)
+
+
+async def _release_member(
     guild: discord.Guild, actor: discord.Member, target: discord.Member
 ) -> tuple[bool, str]:
     config = load_config()
@@ -368,24 +343,19 @@ async def release_member(
     if not record and (not prison_role or prison_role not in target.roles):
         return False, "This member is not in prison."
 
-    if prison_role and prison_role in target.roles:
-        await target.remove_roles(prison_role, reason="Released by prison bot")
+    bot_member = guild.me
+    managed_roles = [
+        role for role in target.roles if role.managed and role.id != guild.id
+    ]
+    roles_to_restore = []
+    if record and record.get("roles") and bot_member:
+        for role_id in record["roles"]:
+            role = guild.get_role(role_id)
+            if role and role.position < bot_member.top_role.position:
+                roles_to_restore.append(role)
 
-    if record and record.get("roles"):
-        bot_member = guild.me
-        if bot_member:
-            roles_to_restore = []
-            for role_id in record["roles"]:
-                role = guild.get_role(role_id)
-                if role and role.position < bot_member.top_role.position:
-                    roles_to_restore.append(role)
-            if roles_to_restore:
-                await target.add_roles(
-                    *roles_to_restore, reason="Released by prison bot"
-                )
-
-    if record and record.get("overwrites"):
-        await restore_prison_overwrites(guild, target, record["overwrites"])
+    new_roles = managed_roles + roles_to_restore
+    await target.edit(roles=new_roles, reason="Released by prison bot")
 
     if record:
         del guild_config["prisoners"][str(target.id)]
@@ -492,7 +462,7 @@ async def setup_command(ctx: commands.Context) -> None:
         await ctx.send("Only admins can run setup.")
         return
 
-    bot_perm_error = ensure_bot_permissions(ctx.guild)
+    bot_perm_error = ensure_bot_permissions(ctx.guild, need_channels=True)
     if bot_perm_error:
         await ctx.send(bot_perm_error)
         return
