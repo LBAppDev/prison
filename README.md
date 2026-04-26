@@ -26,6 +26,7 @@ python bot.py
 - `/release` Release a member from prison.
 - `!prison @user [reason]` Send a member to prison (chat command).
 - `!release @user` Release a member from prison (chat command).
+- `!kill @user` Send an anime action GIF targeting a tagged member (guard/admin only).
 - `!setup` Create or update the Prison roles and channels (chat command).
 - `!setguard @role` Choose the Prison Guard role (chat command).
 

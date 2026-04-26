@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,12 @@ if not TOKEN:
 
 DATA_DIR = Path(__file__).parent / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
+KILL_GIFS = [
+    ("punched", "https://tenor.com/bXUK0.gif"),
+    ("hit", "https://tenor.com/b14FL.gif"),
+    ("wrecked", "https://tenor.com/cserL0grlL3.gif"),
+    ("killed", "https://tenor.com/bY2hZ.gif"),
+]
 
 
 def ensure_data_file() -> None:
@@ -364,6 +371,22 @@ async def _release_member(
     return True, f"Released <@{target.id}>."
 
 
+async def kill_member(
+    guild: discord.Guild, actor: discord.Member, target: discord.Member
+) -> tuple[bool, str]:
+    config = load_config()
+    guild_config = get_guild_config(config, guild.id)
+
+    if not is_guard_or_admin(actor, guild_config):
+        return False, "You must be a prison guard or admin."
+
+    if target.bot:
+        return False, "You cannot use this command on bots."
+
+    action, gif_url = random.choice(KILL_GIFS)
+    return True, f"{actor.mention} {action} {target.mention}\n{gif_url}"
+
+
 @bot.tree.command(name="setguard", description="Set the prison guard role")
 @app_commands.describe(role="Guard role")
 async def setguard(interaction: discord.Interaction, role: discord.Role) -> None:
@@ -449,6 +472,16 @@ async def release_command(ctx: commands.Context, member: discord.Member) -> None
         return
 
     ok, message = await release_member(ctx.guild, ctx.author, member)
+    await ctx.send(message)
+
+
+@bot.command(name="kill")
+@commands.guild_only()
+async def kill_command(ctx: commands.Context, member: discord.Member) -> None:
+    if not isinstance(ctx.author, discord.Member):
+        return
+
+    ok, message = await kill_member(ctx.guild, ctx.author, member)
     await ctx.send(message)
 
 
