@@ -209,7 +209,7 @@ async def on_message(message: discord.Message) -> None:
         if guild_config.get("countEnabled"):
             content = message.content.strip()
             if content.isdecimal():
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 await message.channel.send(str(int(content) + 1))
                 return
 
