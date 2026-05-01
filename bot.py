@@ -27,6 +27,7 @@ KILL_GIFS = [
     ("wrecked", "https://tenor.com/cserL0grlL3.gif"),
     ("killed", "https://tenor.com/bY2hZ.gif"),
 ]
+COUNT_CHANNEL_ID = 1481055106995720242
 
 
 def ensure_data_file() -> None:
@@ -201,6 +202,15 @@ async def on_message(message: discord.Message) -> None:
             f"Chat command from {message.author} in "
             f"{message.guild.name if message.guild else 'DM'}: {message.content}"
         )
+
+    if message.guild and message.channel.id == COUNT_CHANNEL_ID:
+        config = load_config()
+        guild_config = get_guild_config(config, message.guild.id)
+        if guild_config.get("countEnabled"):
+            content = message.content.strip()
+            if content.isdecimal():
+                await message.channel.send(str(int(content) + 1))
+                return
 
     await bot.process_commands(message)
 
@@ -483,6 +493,25 @@ async def kill_command(ctx: commands.Context, member: discord.Member) -> None:
 
     ok, message = await kill_member(ctx.guild, ctx.author, member)
     await ctx.send(message)
+
+
+@bot.command(name="count")
+@commands.guild_only()
+async def count_command(ctx: commands.Context) -> None:
+    if not isinstance(ctx.author, discord.Member):
+        return
+
+    config = load_config()
+    guild_config = get_guild_config(config, ctx.guild.id)
+    if not is_guard_or_admin(ctx.author, guild_config):
+        await ctx.send("You must be a prison guard or admin.")
+        return
+
+    guild_config["countEnabled"] = not guild_config.get("countEnabled", False)
+    save_config(config)
+
+    status = "enabled" if guild_config["countEnabled"] else "disabled"
+    await ctx.send(f"Counting is now {status} in <#{COUNT_CHANNEL_ID}>.")
 
 
 @bot.command(name="setup")
