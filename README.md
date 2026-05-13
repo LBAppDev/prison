@@ -11,7 +11,7 @@ python -m pip install -r requirements.txt
 ```
 
 2. Create `.env` from `.env.example` and set `DISCORD_TOKEN`.
-3. Invite the bot with permissions: Manage Roles, Manage Channels.
+3. Invite the bot with permissions: Manage Roles, Manage Channels, Manage Messages.
 4. Start the bot:
 
 ```bash
@@ -22,16 +22,21 @@ python bot.py
 
 - `/setup` Create or update the Prison roles and channels.
 - `/setguard` Choose the Prison Guard role.
+- `/setrestricter` Choose the Restricter role.
 - `/prison` Send a member to prison.
 - `/release` Release a member from prison.
 - `!prison @user [reason]` Send a member to prison (chat command).
 - `!release @user` Release a member from prison (chat command).
 - `!kill @user` Send an anime action GIF targeting a tagged member (guard/admin only).
+- `!restric @user` Restrict a member so their messages are randomly deleted or replied to with `9iw` (restricter/admin only).
+- `!unrestric @user` Remove a member from the restriction list (restricter/admin only).
 - `!setup` Create or update the Prison roles and channels (chat command).
 - `!setguard @role` Choose the Prison Guard role (chat command).
+- `!setrestricter @role` Choose the Restricter role (chat command).
 
 ## Notes
 
 - The bot stores prisoner roles and permission overwrites in `data/config.json`.
 - Role hierarchy matters: the bot's role must be higher than the Prisoner role and the target's roles.
+- Restricters cannot be sent to prison.
 - Enable the Message Content intent in the Discord Developer Portal for chat commands.

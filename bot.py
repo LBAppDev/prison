@@ -49,9 +49,11 @@ def save_config(config: dict) -> None:
 def get_guild_config(config: dict, guild_id: int) -> dict:
     guild_key = str(guild_id)
     if guild_key not in config["guilds"]:
-        config["guilds"][guild_key] = {"prisoners": {}}
+        config["guilds"][guild_key] = {"prisoners": {}, "restricted": {}}
     if "prisoners" not in config["guilds"][guild_key]:
         config["guilds"][guild_key]["prisoners"] = {}
+    if "restricted" not in config["guilds"][guild_key]:
+        config["guilds"][guild_key]["restricted"] = {}
     return config["guilds"][guild_key]
 
 
@@ -66,6 +68,15 @@ def is_guard_or_admin(member: discord.Member, guild_config: dict) -> bool:
     if not guard_role_id:
         return False
     return any(role.id == guard_role_id for role in member.roles)
+
+
+def is_restricter_or_admin(member: discord.Member, guild_config: dict) -> bool:
+    if is_admin(member):
+        return True
+    restricter_role_id = guild_config.get("restricterRoleId")
+    if not restricter_role_id:
+        return False
+    return any(role.id == restricter_role_id for role in member.roles)
 
 
 def ensure_bot_permissions(
@@ -115,6 +126,14 @@ async def ensure_setup(guild: discord.Guild, config: dict) -> dict:
     if not guard_role:
         guard_role = await guild.create_role(name="Prison Guard", reason="Prison bot setup")
 
+    restricter_role = guild.get_role(guild_config.get("restricterRoleId", 0))
+    if not restricter_role:
+        restricter_role = discord.utils.get(guild.roles, name="Restricter")
+    if not restricter_role:
+        restricter_role = await guild.create_role(
+            name="Restricter", reason="Prison bot setup"
+        )
+
     category = guild.get_channel(guild_config.get("prisonCategoryId", 0))
     if not category:
         category = discord.utils.get(guild.categories, name="Prison")
@@ -125,6 +144,7 @@ async def ensure_setup(guild: discord.Guild, config: dict) -> dict:
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         prison_role: discord.PermissionOverwrite(view_channel=True),
         guard_role: discord.PermissionOverwrite(view_channel=True),
+        restricter_role: discord.PermissionOverwrite(view_channel=True),
     }
     await category.edit(overwrites=category_overwrites, reason="Prison bot setup")
 
@@ -143,6 +163,9 @@ async def ensure_setup(guild: discord.Guild, config: dict) -> dict:
         view_channel=True, send_messages=True, read_message_history=True
     )
     prison_text_overwrites[guard_role] = discord.PermissionOverwrite(
+        view_channel=True, send_messages=True, read_message_history=True
+    )
+    prison_text_overwrites[restricter_role] = discord.PermissionOverwrite(
         view_channel=True, send_messages=True, read_message_history=True
     )
     await prison_text.edit(overwrites=prison_text_overwrites, reason="Prison bot setup")
@@ -164,12 +187,16 @@ async def ensure_setup(guild: discord.Guild, config: dict) -> dict:
     prison_voice_overwrites[guard_role] = discord.PermissionOverwrite(
         view_channel=True, connect=True, speak=True
     )
+    prison_voice_overwrites[restricter_role] = discord.PermissionOverwrite(
+        view_channel=True, connect=True, speak=True
+    )
     await prison_voice.edit(
         overwrites=prison_voice_overwrites, reason="Prison bot setup"
     )
 
     guild_config["prisonRoleId"] = prison_role.id
     guild_config["guardRoleId"] = guard_role.id
+    guild_config["restricterRoleId"] = restricter_role.id
     guild_config["prisonCategoryId"] = category.id
     guild_config["prisonTextChannelId"] = prison_text.id
     guild_config["prisonVoiceChannelId"] = prison_voice.id
@@ -178,6 +205,7 @@ async def ensure_setup(guild: discord.Guild, config: dict) -> dict:
         "guild_config": guild_config,
         "prison_role": prison_role,
         "guard_role": guard_role,
+        "restricter_role": restricter_role,
         "prison_text": prison_text,
         "prison_voice": prison_voice,
     }
@@ -203,9 +231,30 @@ async def on_message(message: discord.Message) -> None:
             f"{message.guild.name if message.guild else 'DM'}: {message.content}"
         )
 
-    if message.guild and message.channel.id == COUNT_CHANNEL_ID:
+    if message.guild:
         config = load_config()
         guild_config = get_guild_config(config, message.guild.id)
+        if str(message.author.id) in guild_config["restricted"]:
+            if random.choice([True, False]):
+                try:
+                    await message.delete()
+                except discord.Forbidden:
+                    try:
+                        await message.channel.send(
+                            "I need Manage Messages permission to delete that."
+                        )
+                    except discord.HTTPException:
+                        pass
+                except discord.HTTPException:
+                    pass
+            else:
+                try:
+                    await message.reply("9iw", mention_author=True)
+                except discord.HTTPException:
+                    pass
+            return
+
+    if message.guild and message.channel.id == COUNT_CHANNEL_ID:
         if guild_config.get("countEnabled"):
             content = message.content.strip()
             if content.isdecimal():
@@ -245,6 +294,7 @@ async def setup(interaction: discord.Interaction) -> None:
         "Prison setup complete.\n"
         f"Prison role: <@&{result['prison_role'].id}>\n"
         f"Guard role: <@&{result['guard_role'].id}>\n"
+        f"Restricter role: <@&{result['restricter_role'].id}>\n"
         f"Text: <#{result['prison_text'].id}>\n"
         f"Voice: <#{result['prison_voice'].id}>",
         ephemeral=True,
@@ -285,6 +335,9 @@ async def _imprison_member(
 
     if is_admin(target):
         return False, "You cannot imprison an admin."
+
+    if is_restricter_or_admin(target, guild_config):
+        return False, "You cannot imprison a restricter."
 
     if not guild_config.get("prisonRoleId") or not guild_config.get("guardRoleId"):
         return False, "Prison is not set up. Run /setup first."
@@ -398,6 +451,48 @@ async def kill_member(
     return True, f"{actor.mention} {action} {target.mention}\n{gif_url}"
 
 
+async def restrict_member(
+    guild: discord.Guild, actor: discord.Member, target: discord.Member
+) -> tuple[bool, str]:
+    config = load_config()
+    guild_config = get_guild_config(config, guild.id)
+
+    if not is_restricter_or_admin(actor, guild_config):
+        return False, "You must be a restricter or admin."
+
+    if target.bot:
+        return False, "You cannot restrict bots."
+
+    if target.id == actor.id:
+        return False, "You cannot restrict yourself."
+
+    guild_config["restricted"][str(target.id)] = {
+        "moderatorId": actor.id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    save_config(config)
+
+    return True, f"Restricted <@{target.id}>."
+
+
+async def unrestrict_member(
+    guild: discord.Guild, actor: discord.Member, target: discord.Member
+) -> tuple[bool, str]:
+    config = load_config()
+    guild_config = get_guild_config(config, guild.id)
+
+    if not is_restricter_or_admin(actor, guild_config):
+        return False, "You must be a restricter or admin."
+
+    if str(target.id) not in guild_config["restricted"]:
+        return False, "This member is not restricted."
+
+    del guild_config["restricted"][str(target.id)]
+    save_config(config)
+
+    return True, f"Unrestricted <@{target.id}>."
+
+
 @bot.tree.command(name="setguard", description="Set the prison guard role")
 @app_commands.describe(role="Guard role")
 async def setguard(interaction: discord.Interaction, role: discord.Role) -> None:
@@ -421,6 +516,32 @@ async def setguard(interaction: discord.Interaction, role: discord.Role) -> None
 
     await interaction.response.send_message(
         f"Guard role set to <@&{role.id}>.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="setrestricter", description="Set the restricter role")
+@app_commands.describe(role="Restricter role")
+async def setrestricter(interaction: discord.Interaction, role: discord.Role) -> None:
+    if not interaction.guild or not interaction.user:
+        await interaction.response.send_message(
+            "Commands can only be used in a server.", ephemeral=True
+        )
+        return
+
+    member = interaction.guild.get_member(interaction.user.id)
+    if not member or not is_admin(member):
+        await interaction.response.send_message(
+            "Only admins can set the restricter role.", ephemeral=True
+        )
+        return
+
+    config = load_config()
+    guild_config = get_guild_config(config, interaction.guild.id)
+    guild_config["restricterRoleId"] = role.id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"Restricter role set to <@&{role.id}>.", ephemeral=True
     )
 
 
@@ -496,6 +617,26 @@ async def kill_command(ctx: commands.Context, member: discord.Member) -> None:
     await ctx.send(message)
 
 
+@bot.command(name="restric")
+@commands.guild_only()
+async def restric_command(ctx: commands.Context, member: discord.Member) -> None:
+    if not isinstance(ctx.author, discord.Member):
+        return
+
+    ok, message = await restrict_member(ctx.guild, ctx.author, member)
+    await ctx.send(message)
+
+
+@bot.command(name="unrestric")
+@commands.guild_only()
+async def unrestric_command(ctx: commands.Context, member: discord.Member) -> None:
+    if not isinstance(ctx.author, discord.Member):
+        return
+
+    ok, message = await unrestrict_member(ctx.guild, ctx.author, member)
+    await ctx.send(message)
+
+
 @bot.command(name="count")
 @commands.guild_only()
 async def count_command(ctx: commands.Context) -> None:
@@ -538,6 +679,7 @@ async def setup_command(ctx: commands.Context) -> None:
         "Prison setup complete.\n"
         f"Prison role: <@&{result['prison_role'].id}>\n"
         f"Guard role: <@&{result['guard_role'].id}>\n"
+        f"Restricter role: <@&{result['restricter_role'].id}>\n"
         f"Text: <#{result['prison_text'].id}>\n"
         f"Voice: <#{result['prison_voice'].id}>"
     )
@@ -559,6 +701,24 @@ async def setguard_command(ctx: commands.Context, role: discord.Role) -> None:
     save_config(config)
 
     await ctx.send(f"Guard role set to <@&{role.id}>.")
+
+
+@bot.command(name="setrestricter")
+@commands.guild_only()
+async def setrestricter_command(ctx: commands.Context, role: discord.Role) -> None:
+    if not isinstance(ctx.author, discord.Member):
+        return
+
+    if not is_admin(ctx.author):
+        await ctx.send("Only admins can set the restricter role.")
+        return
+
+    config = load_config()
+    guild_config = get_guild_config(config, ctx.guild.id)
+    guild_config["restricterRoleId"] = role.id
+    save_config(config)
+
+    await ctx.send(f"Restricter role set to <@&{role.id}>.")
 
 
 @bot.event
